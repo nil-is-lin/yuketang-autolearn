@@ -96,6 +96,7 @@
     <div class="err" id="err"></div>
     <div class="actions">
       <button type="button" id="go">开始刷课</button>
+      <button type="button" class="ghost" id="cancel">取消</button>
       <button type="button" class="ghost" id="quit">退出</button>
     </div>
 
@@ -153,6 +154,14 @@
   $("quit").addEventListener("click", () => {
     if (window.chrome && window.chrome.webview) {
       window.chrome.webview.postMessage({ action: "quit" });
+    }
+  });
+
+  // 中途从菜单打开设置页时才有"取消"（首次启动时由 Rust 侧隐藏）
+  $("cancel").style.display = "__CANCEL_DISPLAY__";
+  $("cancel").addEventListener("click", () => {
+    if (window.chrome && window.chrome.webview) {
+      window.chrome.webview.postMessage({ action: "cancel" });
     }
   });
 </script>

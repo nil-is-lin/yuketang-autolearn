@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>使用说明 · 雨课堂自动学习</title>
+<style>
+  :root { color-scheme: light; }
+  body {
+    margin: 0; min-height: 100vh; padding: 34px 0;
+    font: 14px/1.75 "Microsoft YaHei", system-ui, sans-serif; color: #1f2430;
+    background: linear-gradient(160deg, #eef3ff 0%, #f7f9fc 55%, #eaf0fb 100%);
+    display: flex; justify-content: center;
+  }
+  .card {
+    width: 760px; max-width: calc(100vw - 48px); background: #fff; border-radius: 14px;
+    box-shadow: 0 10px 30px rgba(31, 58, 120, .12); padding: 28px 34px 26px;
+  }
+  h1 { margin: 0 0 4px; font-size: 20px; display: flex; align-items: center; gap: 10px; }
+  .logo {
+    width: 30px; height: 30px; border-radius: 9px; flex: none; color: #fff; font-weight: 700;
+    background: linear-gradient(180deg, #4a7dff, #1a3aa8);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .sub { color: #6b7280; font-size: 13px; margin-bottom: 18px; }
+  h2 { font-size: 15px; margin: 22px 0 8px; padding-left: 9px; border-left: 3px solid #4a7dff; }
+  ol, ul { margin: 6px 0 0; padding-left: 22px; }
+  li { margin: 4px 0; }
+  code {
+    background: #f1f4fa; border-radius: 4px; padding: 1px 6px;
+    font-family: Consolas, monospace; font-size: 12.5px; color: #2b3a55;
+  }
+  table { border-collapse: collapse; width: 100%; margin-top: 8px; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid #eef1f7; }
+  th { color: #4a5568; font-weight: 600; background: #fafbfe; }
+  .note {
+    margin-top: 20px; padding: 10px 12px; border-radius: 8px; font-size: 12px;
+    background: #fff8e6; color: #8a6100; border: 1px solid #ffe3a3;
+  }
+  .about { margin-top: 8px; color: #4a5568; font-size: 13px; }
+  .actions { margin-top: 24px; display: flex; gap: 12px; }
+  button {
+    padding: 10px 20px; border: 0; border-radius: 9px; font-size: 14px; font-weight: 600;
+    color: #fff; cursor: pointer; background: linear-gradient(180deg, #4a7dff, #2f5ce0);
+  }
+  button.ghost { background: #fff; color: #4a5568; border: 1px solid #d8deea; font-weight: 500; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1><span class="logo">学</span>使用说明</h1>
+    <div class="sub">雨课堂自动学习 · 本工具只在本机运行，账号密码直接输入到官方页面，不经过任何第三方。</div>
+
+    <h2>怎么用</h2>
+    <ol>
+      <li>启动后，在设置页选好<b>倍速</b>和<b>是否记住登录</b>，点「开始刷课」；</li>
+      <li>如果还没登录，程序会停在登录页等你扫码/输密码，登录成功后自动继续；</li>
+      <li>之后它会自己逐级进入课程、点播放、切下一门，你不用管；</li>
+      <li>想改倍速或看说明，随时用窗口顶部的菜单。</li>
+    </ol>
+
+    <h2>菜单</h2>
+    <table>
+      <tr><th>菜单项</th><th>作用</th></tr>
+      <tr><td>设置</td><td>随时打开设置页，改倍速/登录方式；确认后立刻按新设置继续</td></tr>
+      <tr><td>使用说明</td><td>就是这一页</td></tr>
+      <tr><td>退出</td><td>结束运行，窗口关闭</td></tr>
+    </table>
+
+    <h2>完成判定</h2>
+    <ul>
+      <li>只有课程页显示<b>「已完成」</b>才算学完并切下一门——视频播到结尾、进度 99% 都不算，避免服务端还没记学时就被跳过；</li>
+      <li>播放不了的课程（没选课/资源下线）会重试几次后跳过，稍后再回来补。</li>
+    </ul>
+
+    <h2>关于</h2>
+    <div class="about">
+      雨课堂自动学习 · Rust + WebView2 实现，单文件 exe，无外部依赖。<br>
+      开源协议 MIT；源码与适配器配置见项目仓库（<code>adapters/yuketang.toml</code> 可按平台改版自行调整）。
+    </div>
+
+    <div class="note">
+      仅供个人学习与自动化技术研究：请确认平台服务条款允许此类操作，账号风险自负。
+      是否完成学时最终由平台判定，不要用它代替真正的学习。
+    </div>
+
+    <div class="actions">
+      <button id="back">返回</button>
+    </div>
+  </div>
+<script>
+  // 返回：交给 Rust 侧决定回到哪个页面（通常是刚才在看的课程页）
+  document.getElementById("back").addEventListener("click", () => {
+    if (window.chrome && window.chrome.webview) {
+      window.chrome.webview.postMessage({ action: "back" });
+    }
+  });
+</script>
+</body>
+</html>

@@ -8,6 +8,8 @@ use tokio::time::sleep;
 const PLAYER_JS: &str = include_str!("../assets/player.js");
 /// 首次运行的设置页：填地址、选倍速，点「开始刷课」。
 const SETUP_HTML: &str = include_str!("../assets/setup.html");
+/// 使用说明/关于
+const HELP_HTML: &str = include_str!("../assets/help.html");
 
 /// 让页面自己去问服务端"我是谁"。写进 window.__YKT_LOGIN 供 Rust 轮询。
 /// 用异步 fetch + 全局变量，而不是直接返回 Promise——我们的求值接口不等 Promise。
@@ -24,10 +26,10 @@ const LOGIN_PROBE_JS: &str = r#"(() => {
         let j = null;
         try { j = JSON.parse(t); } catch (e) {}
         const code = j && (j.code ?? j.errcode ?? j.err_code);
-        const unauth =
-          r.status === 401 ||
-          code === 401 || code === -1 || code === 40001 || code === 10001 ||
-          /"?(login|passport|未登录|请先登录)"?/i.test(t.slice(0, 300));
+        // 只认明确的未登录信号：HTTP 401，或返回里的业务码。
+        // 之前用文本匹配 "login"，结果 SPA 的 HTML 里到处都是 login，误判成未登录，
+        // 程序卡在"等登录"什么都不干。
+        const unauth = r.status === 401 || code === 401 || code === -1 || code === 40001 || code === 10001;
         if (unauth) return done({ state: 'no', via: u, status: r.status, code: code ?? null });
         // 能拿到用户信息就算登录成功
         if (r.ok && j && (j.data || j.user || j.name || j.user_id)) {
@@ -64,64 +66,24 @@ pub async fn run(
     // 没有地址就先把设置页摆出来：地址、倍速、要不要记住登录，都让用户点。
     // 用 WebView2 自己渲染 HTML，不引 GUI 框架，也不用写配置文件。
     let mut chosen_rate = rate;
-    let start_url = match start_url {
+    let mut start_url = match start_url {
         Some(u) => u,
-        None => {
-            let cfg_path = Store::path(state_dir, "config");
-            let saved = crate::state::Config::load(&cfg_path);
-            // 没存过地址时给个默认域名，用户只要把后面的课程编号补上就行
-            const DEFAULT_ENTRY_BASE: &str = "https://acgecfd.yuketang.cn";
-            let prefill = if saved.url.is_empty() {
-                DEFAULT_ENTRY_BASE.to_string()
-            } else {
-                saved.url.clone()
-            };
-            let html = SETUP_HTML.replace("__PREFILL__", &prefill)
-                .replace("__RATE__", &format!("{}", saved.rate));
-            page.show_html(&html).await?;
-            println!("已打开设置页：确认倍速/登录方式后，点「开始刷课」。");
-            let mut picked: Option<(String, f64)> = None;
-            loop {
-                sleep(Duration::from_millis(400)).await;
-                let Some(raw) = page.take_message() else {
-                    continue;
-                };
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
-                    continue;
-                };
-                let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("");
-                if action == "quit" {
-                    println!("用户选择退出。");
-                    session.close().await;
-                    return Ok(());
-                }
-                if action != "start" {
-                    continue;
-                }
-                let url = v.get("url").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-                if url.is_empty() {
-                    continue;
-                }
-                let r = v.get("rate").and_then(|x| x.as_f64()).unwrap_or(2.0);
-                let keep = v.get("keepLogin").and_then(|x| x.as_bool()).unwrap_or(false);
-                let cfg = crate::state::Config {
-                    url: url.clone(),
-                    rate: r,
-                    keep_login: keep,
-                };
-                let _ = cfg.save(&cfg_path);
-                picked = Some((url, r));
-                break;
+        None => match show_setup(&page, state_dir, false).await {
+            SetupResult::Start { url, rate, .. } => {
+                chosen_rate = rate;
+                url
             }
-            let (url, r) = picked.expect("循环只在拿到地址后返回");
-            chosen_rate = r;
-            url
-        }
+            _ => {
+                println!("已退出。");
+                session.close().await;
+                return Ok(());
+            }
+        },
     };
     let adapter = Adapter::load_for(adapters_dir, &start_url)?;
     anyhow::ensure!(adapter.handles(&start_url.parse()?), "当前适配器 {0} 不匹配 {start_url}", adapter.name);
 
-    let cfg = Cfg {
+    let mut cfg = Cfg {
         rate: chosen_rate,
         // 0 = 刷到没有下一项为止（双击 exe 的默认）
         max_items: if max_items == 0 { usize::MAX } else { max_items },
@@ -157,7 +119,11 @@ pub async fn run(
         Ok(u) => format!("{}://{}", u.scheme(), u.host_str().unwrap_or("")),
         Err(_) => String::new(),
     };
-    ensure_login(&page, &origin).await;
+    if ensure_login(&page, &origin, state_dir).await {
+        println!("用户选择退出。");
+        session.close().await;
+        return Ok(());
+    }
 
     println!(
         "开始：{} 倍速，完成阈值按路由配置。状态文件 {}",
@@ -226,6 +192,17 @@ pub async fn run(
 
     loop {
         sleep(tick_now).await;
+
+        // 菜单：设置/说明随时可打开；退出则收摊。
+        if handle_ui(&page, state_dir).await {
+            println!("用户选择退出。");
+            break;
+        }
+        // 菜单里改过的倍速立刻生效
+        if let Some(r) = wanted_rate() {
+            cfg.rate = r;
+        }
+
         if auto_zoom {
             let _ = page.fit_zoom().await;
         }
@@ -544,6 +521,142 @@ fn j<T: serde::Serialize>(v: T) -> String {
     serde_json::to_string(&v).unwrap_or_else(|_| "null".into())
 }
 
+/// 菜单里改的倍速：任何状态（等登录、刷课中）都能被立即采纳
+static WANT_RATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn wanted_rate() -> Option<f64> {
+    let bits = WANT_RATE.load(std::sync::atomic::Ordering::Relaxed);
+    if bits == 0 {
+        None
+    } else {
+        Some(f64::from_bits(bits))
+    }
+}
+
+/// 处理菜单请求。返回 true 表示用户要退出。
+/// 这个函数与"刷课循环"解耦：等登录、等设置页确认的时候也能响应菜单，
+/// 否则一旦卡在等登录，菜单点了就像没反应。
+async fn handle_ui(page: &crate::browser::Page, state_dir: &Path) -> bool {
+    loop {
+        let Some(cmd) = crate::web::take_ui() else {
+            return false;
+        };
+        let here = page.url().await.unwrap_or_default();
+        let back = here.starts_with("http");
+        match cmd {
+            crate::web::UiCmd::Quit => return true,
+            crate::web::UiCmd::Help => {
+                println!("打开使用说明。");
+                let _ = page.show_html(HELP_HTML).await;
+                loop {
+                    sleep(Duration::from_millis(300)).await;
+                    if let Some(raw) = page.take_message() {
+                        if raw.contains("back") {
+                            break;
+                        }
+                    }
+                }
+                if back {
+                    let _ = page.goto(&here).await;
+                }
+            }
+            crate::web::UiCmd::Settings => {
+                println!("打开设置页（运行中）。");
+                match show_setup(page, state_dir, true).await {
+                    SetupResult::Start { url, rate, .. } => {
+                        WANT_RATE.store(rate.to_bits(), std::sync::atomic::Ordering::Relaxed);
+                        println!("倍速已改为 x{rate}。");
+                        let _ = page.goto(&url).await;
+                    }
+                    SetupResult::Cancel => {
+                        println!("已取消。");
+                        if back {
+                            let _ = page.goto(&here).await;
+                        }
+                    }
+                    SetupResult::Quit => return true,
+                }
+            }
+        }
+    }
+}
+
+/// 设置页的结果
+enum SetupResult {
+    Start {
+        url: String,
+        rate: f64,
+        keep_login: bool,
+    },
+    Cancel,
+    Quit,
+}
+
+/// 打开设置页并等用户点按钮。首次启动时没有"取消"，运行中从菜单打开则有。
+async fn show_setup(
+    page: &crate::browser::Page,
+    state_dir: &Path,
+    allow_cancel: bool,
+) -> SetupResult {
+    let cfg_path = Store::path(state_dir, "config");
+    let saved = crate::state::Config::load(&cfg_path);
+    const DEFAULT_ENTRY_BASE: &str = "https://acgecfd.yuketang.cn";
+    let prefill = if saved.url.is_empty() {
+        DEFAULT_ENTRY_BASE.to_string()
+    } else {
+        saved.url.clone()
+    };
+    let html = SETUP_HTML
+        .replace("__PREFILL__", &prefill)
+        .replace("__RATE__", &format!("{}", saved.rate))
+        .replace(
+            "__CANCEL_DISPLAY__",
+            if allow_cancel { "inline-block" } else { "none" },
+        );
+    if page.show_html(&html).await.is_err() {
+        return SetupResult::Quit;
+    }
+    println!("已打开设置页：确认倍速/登录方式后，点「开始刷课」。");
+    loop {
+        sleep(Duration::from_millis(400)).await;
+        let Some(raw) = page.take_message() else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        match v.get("action").and_then(|x| x.as_str()).unwrap_or("") {
+            "quit" => return SetupResult::Quit,
+            "cancel" => return SetupResult::Cancel,
+            "start" => {
+                let url = v
+                    .get("url")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if url.is_empty() {
+                    continue;
+                }
+                let rate = v.get("rate").and_then(|x| x.as_f64()).unwrap_or(2.0);
+                let keep_login = v.get("keepLogin").and_then(|x| x.as_bool()).unwrap_or(false);
+                let cfg = crate::state::Config {
+                    url: url.clone(),
+                    rate,
+                    keep_login,
+                };
+                let _ = cfg.save(&cfg_path);
+                return SetupResult::Start {
+                    url,
+                    rate,
+                    keep_login,
+                };
+            }
+            _ => continue,
+        }
+    }
+}
+
 /// 问一次服务端"当前是谁"，返回 yes / no / unknown。
 async fn login_state(page: &crate::browser::Page) -> &'static str {
     if eval_json(page, LOGIN_PROBE_JS).await.is_err() {
@@ -570,13 +683,14 @@ async fn login_state(page: &crate::browser::Page) -> &'static str {
 }
 
 /// 确保处于登录态：未登录时把用户送回站点首页，等他登录完再继续。
-/// 站点允许匿名看课，所以这一步不能省略——否则"登录后才刷课"这条前提就不成立了。
-async fn ensure_login(page: &crate::browser::Page, origin: &str) {
+/// 站点允许匿名看课，所以这一步不能省略；但也不能死等——等太久就带警告继续，
+/// 免得上游接口误判把整个刷课卡死。
+async fn ensure_login(page: &crate::browser::Page, origin: &str, state_dir: &Path) -> bool {
     loop {
         match login_state(page).await {
             "yes" => {
                 println!("已登录，开始刷课。");
-                return;
+                return false;
             }
             "no" => {
                 println!("检测到未登录：请在这个窗口里完成登录（扫码或账号密码），登录后会自动继续。");
@@ -586,20 +700,27 @@ async fn ensure_login(page: &crate::browser::Page, origin: &str) {
             }
             _ => {
                 println!("无法确认登录状态（接口可能改版），按已登录继续。");
-                return;
+                return false;
             }
         }
-        // 等用户登录；期间不断复查
+        // 等用户登录；期间不断复查，并能响应菜单，最多等 3 分钟
         let mut waited = 0u32;
         loop {
             sleep(Duration::from_secs(3)).await;
             waited += 1;
+            if handle_ui(page, state_dir).await {
+                return true;
+            }
             if login_state(page).await == "yes" {
                 println!("已登录，开始刷课。");
-                return;
+                return false;
             }
             if waited % 20 == 0 {
                 println!("仍在等待登录（已等 {} 秒）…", waited * 3);
+            }
+            if waited >= 60 {
+                println!("等待登录超时，先按当前状态继续（登录后可随时手动刷新）。");
+                return false;
             }
         }
     }

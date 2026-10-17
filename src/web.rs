@@ -35,13 +35,14 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{EM_SCROLLCARET, EM_SETSEL};
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetCursorPos, GetParent, MSG,
-    MoveWindow, PM_REMOVE, PostQuitMessage, PeekMessageW, RegisterClassW, SendMessageW, SetCursor,
-    SetProcessDPIAware, ShowWindow, TranslateMessage, WNDCLASSW, CW_USEDEFAULT, ES_AUTOVSCROLL,
-    ES_MULTILINE, ES_READONLY, HICON, IDC_SIZENS, IMAGE_ICON, LR_DEFAULTSIZE, LR_SHARED,
-    LoadCursorW, LoadImageW, SW_SHOWMAXIMIZED, WM_CLOSE, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_PAINT, WM_QUIT, WM_SETFONT, WM_SETCURSOR, WM_SIZE, WS_CHILD,
-    WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_VSCROLL,
+    AppendMenuW, CreateMenu, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect,
+    GetCursorPos, GetParent, MSG, MoveWindow, PM_REMOVE, PostQuitMessage, PeekMessageW,
+    RegisterClassW, SendMessageW, SetCursor, SetMenu, SetProcessDPIAware, ShowWindow,
+    TranslateMessage, WNDCLASSW, CW_USEDEFAULT, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, HICON,
+    IDC_SIZENS, IMAGE_ICON, LR_DEFAULTSIZE, LR_SHARED, LoadCursorW, LoadImageW, MF_STRING,
+    SW_SHOWMAXIMIZED, WM_CLOSE, WM_COMMAND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
+    WM_QUIT, WM_SETFONT, WM_SETCURSOR, WM_SIZE, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    WS_VSCROLL,
 };
 
 const EVAL_TIMEOUT: Duration = Duration::from_secs(90);
@@ -277,6 +278,30 @@ impl Web {
     }
 }
 
+/// 菜单里点的东西，交给 tokio 侧的刷课循环去处理。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiCmd {
+    /// 打开设置页（可改倍速/登录方式）
+    Settings,
+    /// 打开使用说明/关于
+    Help,
+    /// 退出
+    Quit,
+}
+
+static UI_QUEUE: Mutex<Vec<UiCmd>> = Mutex::new(Vec::new());
+
+/// 取走用户从菜单发出的请求
+pub fn take_ui() -> Option<UiCmd> {
+    UI_QUEUE.lock().ok().and_then(|mut q| {
+        if q.is_empty() {
+            None
+        } else {
+            Some(q.remove(0))
+        }
+    })
+}
+
 thread_local! {
     static CONTROLLER: RefCell<Option<ICoreWebView2Controller>> = const { RefCell::new(None) };
     /// 窗口下半部分的日志面板句柄
@@ -394,6 +419,21 @@ unsafe extern "system" fn splitter_proc(
 }
 
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if msg == WM_COMMAND {
+        // 菜单项 ID → 交给 tokio 侧处理（设置页/说明/退出）
+        let id = (wparam.0 & 0xFFFF) as u32;
+        let cmd = match id {
+            1001 => Some(UiCmd::Settings),
+            1002 => Some(UiCmd::Help),
+            _ => None,
+        };
+        if let Some(c) = cmd {
+            if let Ok(mut q) = UI_QUEUE.lock() {
+                q.push(c);
+            }
+            return LRESULT(0);
+        }
+    }
     if msg == WM_SIZE {
         layout(hwnd);
         return LRESULT(0);
@@ -462,6 +502,14 @@ fn run(
             None,
         )
         .map_err(|e| anyhow!("建窗口失败：{e}"))?;
+
+        // 菜单栏：随时能打开设置、使用说明。退出交给窗口右上角的关闭按钮，不重复放一个。
+        if let Ok(menu) = CreateMenu() {
+            let _ = AppendMenuW(menu, MF_STRING, 1001, w!("设置(&S)"));
+            let _ = AppendMenuW(menu, MF_STRING, 1002, w!("使用说明(&H)"));
+            let _ = SetMenu(hwnd, Some(menu));
+        }
+
         let _ = ShowWindow(hwnd, SW_SHOWMAXIMIZED);
         hwnd
     };
@@ -623,7 +671,7 @@ fn run(
             };
             // 内置页面是 data: URL，整段打出来会把日志刷爆
             if text.starts_with("data:") {
-                println!("[导航开始] 内置页面（设置页）");
+                println!("[导航开始] 内置页面");
             } else {
                 println!("[导航开始] {text}");
             }

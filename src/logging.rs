@@ -102,14 +102,41 @@ fn redirect(tx: Sender<String>) -> anyhow::Result<()> {
                 let read = HANDLE(read_raw as *mut std::ffi::c_void);
                 let mut buf = [0u8; 4096];
                 let mut pending: Vec<u8> = Vec::new();
-                // 需要留证据时（GUI 子系统没有控制台）把同样的内容落到文件
-                let mut file = std::env::var("YKT_LOG_FILE").ok().and_then(|p| {
-                    std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(p)
-                        .ok()
+                // 日志一律落盘：面板里的内容关窗就没了，出问题时要能回看。
+                // 环境变量 YKT_LOG_FILE 可以换路径；默认写 state/logs/run-<时间>.log。
+                let path = std::env::var("YKT_LOG_FILE").ok().unwrap_or_else(|| {
+                    let dir = std::path::Path::new("state").join("logs");
+                    let _ = std::fs::create_dir_all(&dir);
+                    dir.join(format!(
+                        "run-{}.log",
+                        chrono::Local::now().format("%Y%m%d-%H%M%S")
+                    ))
+                    .to_string_lossy()
+                    .to_string()
                 });
+                println!("日志文件：{path}");
+                // 只留最近 10 份，避免长期运行把磁盘塞满
+                if let Some(dir) = std::path::Path::new(&path).parent() {
+                    if let Ok(rd) = std::fs::read_dir(dir) {
+                        let mut files: Vec<_> = rd
+                            .flatten()
+                            .filter(|e| {
+                                e.path().extension().and_then(|x| x.to_str()) == Some("log")
+                            })
+                            .collect();
+                        if files.len() > 10 {
+                            files.sort_by_key(|e| e.metadata().ok().and_then(|m| m.modified().ok()));
+                            for old in files.iter().take(files.len() - 10) {
+                                let _ = std::fs::remove_file(old.path());
+                            }
+                        }
+                    }
+                }
+                let mut file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .ok();
                 loop {
                     let mut got = 0u32;
                     if ReadFile(read, Some(&mut buf), Some(&mut got), None).is_err() {
