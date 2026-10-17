@@ -16,3 +16,5 @@ session-*/
 # 各平台杂项
 .DS_Store
 Thumbs.db
+
+dist/

@@ -4,6 +4,19 @@
 按「培训项目 → 课程 → 章节 → 视频」逐级点进去，自动点播放、2 倍速、静音，
 学完一项自动切下一项。
 
+## 下载
+
+到 [Releases](../../releases) 下载 `yuketang-autolearn-v<版本>-windows-x64.exe`，
+双击即用，无需安装（Windows 10/11 x64，依赖系统自带的 WebView2 运行时）。
+
+校验：同目录的 `SHA256SUMS.txt`，PowerShell 下：
+
+```powershell
+Get-FileHash .\yuketang-autolearn-v1.0.0-windows-x64.exe -Algorithm SHA256
+```
+
+版本变更见 [CHANGELOG.md](CHANGELOG.md)。
+
 **界面只有一个窗口**：上半部分是播放器，下半部分是实时日志（编译成 Windows GUI
 子系统，双击运行不会弹出黑色控制台窗口，exe 也带了自己的图标）。中间的灰色分隔条
 可以直接拖动，调整上下比例。窗口顶部有菜单：
@@ -115,6 +128,10 @@ MIT，见 [LICENSE](LICENSE)。
 cargo build --release
 # 产物：target\release\yuketang-autolearn.exe
 ```
+
+README 的「下载」用的是 CI 产物：打 tag（`v1.0.0`）会自动触发
+`.github/workflows/release.yml`，在 windows-latest 上跑测试、构建、
+生成 `SHA256SUMS.txt` 并把 exe 挂到 GitHub Release。
 
 图标和版本信息由 `build.rs` + `winresource` 在构建时写进资源段（需要 rc.exe，
 在 Windows SDK 的 bin 目录下；没找到只会警告，不影响运行）。

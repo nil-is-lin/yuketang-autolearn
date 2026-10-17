@@ -1,0 +1,67 @@
+name: release
+
+# 打 tag（v1.0.0 这种）就自动在 Windows 上构建 exe，并把它挂到 GitHub Release。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存依赖
+        uses: Swatinem/rust-cache@v2
+
+      - name: 单元测试
+        run: cargo test --release
+
+      - name: 构建
+        run: cargo build --release
+
+      - name: 打包（附校验和）
+        shell: pwsh
+        run: |
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          $name = "yuketang-autolearn-v$ver-windows-x64.exe"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/yuketang-autolearn.exe "dist/$name"
+          $hash = (Get-FileHash "dist/$name" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name" | Out-File -Encoding ascii "dist/SHA256SUMS.txt"
+          "VERSION=$ver" | Out-File -Encoding ascii -Append $env:GITHUB_ENV
+          "ASSET=$name" | Out-File -Encoding ascii -Append $env:GITHUB_ENV
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/*
+
+      - name: 创建 Release（仅 tag 触发）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.exe
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
+          body: |
+            雨课堂自动学习 ${{ env.VERSION }}
+
+            **下载**：`${{ env.ASSET }}`（Windows 10/11 x64，单文件，无需安装）
+
+            **校验**：见 `SHA256SUMS.txt`
+
+            **用法**：双击运行 → 设置页选倍速 → 「开始刷课」→ 首次需要登录。
+            默认不保存登录态；勾选「记住登录」才会复用。
+
+            > 仅供个人学习与自动化技术研究，请确认平台服务条款允许此类操作，账号风险自负。
