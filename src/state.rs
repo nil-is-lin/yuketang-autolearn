@@ -78,3 +78,50 @@ impl Store {
         n
     }
 }
+
+/// 用户的选择（设置页里填的），存成 state/config.json。
+/// 有了它就不需要用户记命令行参数：下次启动直接沿用上次的地址和倍速。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default = "default_rate")]
+    pub rate: f64,
+    #[serde(default)]
+    pub keep_login: bool,
+}
+
+fn default_rate() -> f64 {
+    2.0
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            rate: 2.0,
+            keep_login: false,
+        }
+    }
+}
+
+impl Config {
+    pub fn path(dir: &Path) -> PathBuf {
+        dir.join("config.json")
+    }
+
+    pub fn load(path: &Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self, path: &Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, serde_json::to_string_pretty(self)?)?;
+        Ok(())
+    }
+}

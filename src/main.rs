@@ -135,9 +135,12 @@ fn main() -> anyhow::Result<()> {
     if cli.cmd.is_none() {
         cli.cmd = Some(Cmd::Learn { url: None, rate: 2.0, max: 0 });
     }
-    // 默认不留登录态：每次启动都用一个临时会话目录，退出就删掉。
-    // 这样换人用、公用电脑都不需要额外操作，也不会把别人的登录态留在磁盘上。
-    let ephemeral = !cli.keep_login;
+    // 登录态策略：默认每次启动都要重新登录（一次性会话目录，退出即删）。
+    // 只有在设置页选过「记住登录」、或者命令行显式 --keep-login 时才复用。
+    // 之前只把设置页的选择存下来却没读，结果"选了不记住"也照旧免登录。
+    let saved = state::Config::load(&state::Config::path(Path::new("state")));
+    let keep_login = cli.keep_login || (saved.keep_login && !cli.switch);
+    let ephemeral = !keep_login;
     let profile = if ephemeral {
         // 放工作区里而不是系统临时目录：有些机器 Temp 目录权限收紧，
         // WebView2 建不了用户数据目录会直接报"拒绝访问"。
@@ -191,18 +194,9 @@ async fn run(cli: Cli, profile: PathBuf, ephemeral: bool) -> anyhow::Result<()> 
             if rate > 2.0 {
                 println!("警告：倍速 {rate} 超过平台播放器上限 2.0，心跳增量会显得不合常理，有被判异常并清空进度的风险");
             }
-            let url = match resolve_entry(url) {
-                Some(u) => u,
-                None => anyhow::bail!(
-                    "还不知道从哪开始。第一次运行请用 --url 指定「培训项目详情页」地址，例如：\n\
-                     \x20 yuketang-autolearn.exe learn --url https://<你的学校域名>/pro/trainingproject/mytraining/detail/<id>\n\
-                     跑过一次之后会记在 state/last_url.txt，下次直接运行就沿用；\n\
-                     也可以用环境变量 YKT_ENTRY 指定。"
-                ),
-            };
-            println!("起点：{url}");
-            let adapter = load_adapter(&cli.adapters, &url)?;
-            player::run(&url, &adapter, &Path::new("state"), &profile, cli.browser.as_deref(), cli.zoom, rate, max).await
+            let url = resolve_entry(url);
+            let adapters_dir = cli.adapters.clone();
+            player::run(url, &adapters_dir, &Path::new("state"), &profile, cli.browser.as_deref(), cli.zoom, rate, max).await
         }
         Cmd::Verify { url, samples, wait, peek } => {
             let adapter = load_adapter(&cli.adapters, &url)?;

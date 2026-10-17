@@ -1,6 +1,9 @@
 use serde::Deserialize;
 use std::path::Path;
 
+/// 编译进二进制的适配器，缺 adapters 目录时兜底；磁盘上的同名文件优先（方便平台改版时热改）。
+const BUILTIN_ADAPTERS: &[(&str, &str)] = &[("yuketang.toml", include_str!("../adapters/yuketang.toml"))];
+
 /// 参考 OCS 的 Project/Script/matches 结构：域名 + 路由前缀决定这段页面交给哪个处理器。
 /// 选择器全部外置到 TOML，平台改版时改配置而不是重编译。
 #[derive(Debug, Clone, Deserialize)]
@@ -74,6 +77,39 @@ pub enum RouteKind {
 }
 
 impl Adapter {
+    /// 按 URL 在目录里挑一个能处理它的适配器；目录里没有就退回编译进二进制的那份。
+    /// 这样只发一个 exe 也能跑，同时保留"改 toml 就适配新版页面"的能力。
+    pub fn load_for(dir: &Path, url: &str) -> anyhow::Result<Self> {
+        let parsed: url::Url = url.parse()?;
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                    candidates.push(path);
+                }
+            }
+        }
+        for path in &candidates {
+            match Self::load(path) {
+                Ok(adapter) if adapter.handles(&parsed) => return Ok(adapter),
+                Ok(_) => {}
+                Err(e) => println!("跳过适配器 {}：{e}", path.display()),
+            }
+        }
+        for (name, text) in BUILTIN_ADAPTERS {
+            let adapter = Self::parse(text, name)?;
+            if adapter.handles(&parsed) {
+                return Ok(adapter);
+            }
+        }
+        anyhow::bail!(
+            "没有适配器匹配 {url}。已加载：{:?}\n请在 {} 下新建 toml，把域名加进去。",
+            candidates,
+            dir.display()
+        )
+    }
+
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("读取适配器 {} 失败：{e}", path.display()))?;

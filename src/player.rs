@@ -6,6 +6,39 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
 const PLAYER_JS: &str = include_str!("../assets/player.js");
+/// 首次运行的设置页：填地址、选倍速，点「开始刷课」。
+const SETUP_HTML: &str = include_str!("../assets/setup.html");
+
+/// 让页面自己去问服务端"我是谁"。写进 window.__YKT_LOGIN 供 Rust 轮询。
+/// 用异步 fetch + 全局变量，而不是直接返回 Promise——我们的求值接口不等 Promise。
+const LOGIN_PROBE_JS: &str = r#"(() => {
+  window.__YKT_LOGIN = { state: 'pending' };
+  const done = (v) => { window.__YKT_LOGIN = v; };
+  (async () => {
+    // 不同变体接口不同，挨个试；只要有任意一个明确表示"未登录"就判定未登录
+    const urls = ['/v2/api/web/userinfo', '/edu_admin/get_user_basic_info/'];
+    for (const u of urls) {
+      try {
+        const r = await fetch(u, { credentials: 'include' });
+        const t = (await r.text()).slice(0, 2000);
+        let j = null;
+        try { j = JSON.parse(t); } catch (e) {}
+        const code = j && (j.code ?? j.errcode ?? j.err_code);
+        const unauth =
+          r.status === 401 ||
+          code === 401 || code === -1 || code === 40001 || code === 10001 ||
+          /"?(login|passport|未登录|请先登录)"?/i.test(t.slice(0, 300));
+        if (unauth) return done({ state: 'no', via: u, status: r.status, code: code ?? null });
+        // 能拿到用户信息就算登录成功
+        if (r.ok && j && (j.data || j.user || j.name || j.user_id)) {
+          return done({ state: 'yes', via: u, status: r.status });
+        }
+      } catch (e) {}
+    }
+    done({ state: 'unknown' });
+  })();
+  return 'started';
+})()"#;
 
 #[derive(Debug)]
 struct Cfg {
@@ -16,8 +49,8 @@ struct Cfg {
 }
 
 pub async fn run(
-    start_url: &str,
-    adapter: &Adapter,
+    start_url: Option<String>,
+    adapters_dir: &Path,
     state_dir: &Path,
     profile: &Path,
     browser_path: Option<&str>,
@@ -25,10 +58,71 @@ pub async fn run(
     rate: f64,
     max_items: usize,
 ) -> anyhow::Result<()> {
+    let mut session = browser::Session::launch(profile, browser_path, (1360, 900), zoom).await?;
+    let page = session.page();
+
+    // 没有地址就先把设置页摆出来：地址、倍速、要不要记住登录，都让用户点。
+    // 用 WebView2 自己渲染 HTML，不引 GUI 框架，也不用写配置文件。
+    let mut chosen_rate = rate;
+    let start_url = match start_url {
+        Some(u) => u,
+        None => {
+            let cfg_path = Store::path(state_dir, "config");
+            let saved = crate::state::Config::load(&cfg_path);
+            // 没存过地址时给个默认域名，用户只要把后面的课程编号补上就行
+            const DEFAULT_ENTRY_BASE: &str = "https://acgecfd.yuketang.cn";
+            let prefill = if saved.url.is_empty() {
+                DEFAULT_ENTRY_BASE.to_string()
+            } else {
+                saved.url.clone()
+            };
+            let html = SETUP_HTML.replace("__PREFILL__", &prefill)
+                .replace("__RATE__", &format!("{}", saved.rate));
+            page.show_html(&html).await?;
+            println!("已打开设置页：请在窗口里填培训项目详情页地址，然后点「开始刷课」。");
+            let mut picked: Option<(String, f64)> = None;
+            loop {
+                sleep(Duration::from_millis(400)).await;
+                let Some(raw) = page.take_message() else {
+                    continue;
+                };
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                    continue;
+                };
+                let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("");
+                if action == "quit" {
+                    println!("用户选择退出。");
+                    session.close().await;
+                    return Ok(());
+                }
+                if action != "start" {
+                    continue;
+                }
+                let url = v.get("url").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                if url.is_empty() {
+                    continue;
+                }
+                let r = v.get("rate").and_then(|x| x.as_f64()).unwrap_or(2.0);
+                let keep = v.get("keepLogin").and_then(|x| x.as_bool()).unwrap_or(false);
+                let cfg = crate::state::Config {
+                    url: url.clone(),
+                    rate: r,
+                    keep_login: keep,
+                };
+                let _ = cfg.save(&cfg_path);
+                picked = Some((url, r));
+                break;
+            }
+            let (url, r) = picked.expect("循环只在拿到地址后返回");
+            chosen_rate = r;
+            url
+        }
+    };
+    let adapter = Adapter::load_for(adapters_dir, &start_url)?;
     anyhow::ensure!(adapter.handles(&start_url.parse()?), "当前适配器 {0} 不匹配 {start_url}", adapter.name);
 
     let cfg = Cfg {
-        rate,
+        rate: chosen_rate,
         // 0 = 刷到没有下一项为止（双击 exe 的默认）
         max_items: if max_items == 0 { usize::MAX } else { max_items },
         // 目录页只需要点入口，轮询要快；播放中才用慢节拍，免得日志刷屏。
@@ -37,7 +131,7 @@ pub async fn run(
         stall_limit: Duration::from_secs(60),
     };
 
-    let key = format!("{:08x}", fnv(start_url));
+    let key = format!("{:08x}", fnv(&start_url));
     let state_path = Store::path(state_dir, &key);
     let mut store = Store::load(&state_path);
     store.url = start_url.to_string();
@@ -50,13 +144,20 @@ pub async fn run(
     }
     // 双击 exe 时不带参数也要能跑：把这次用的地址记下来当默认值
     if std::fs::create_dir_all(state_dir).is_ok() {
-        let _ = std::fs::write(state_dir.join("last_url.txt"), start_url);
+        let _ = std::fs::write(state_dir.join("last_url.txt"), &start_url);
     }
 
-    let mut session = browser::Session::launch(profile, browser_path, (1360, 900), zoom).await?;
-    let page = session.new_page(start_url).await?;
+    let page = session.new_page(&start_url).await?;
     let _ = page.add_init_script(PLAYER_JS).await;
     eval_json(&page, PLAYER_JS).await.ok();
+
+    // 站点对课程页并不强制登录，直接进去也能看——但我们要求"登录后才能刷"，
+    // 所以这里主动问一次服务端身份，未登录就停下来等用户登录。
+    let origin = match start_url.parse::<url::Url>() {
+        Ok(u) => format!("{}://{}", u.scheme(), u.host_str().unwrap_or("")),
+        Err(_) => String::new(),
+    };
+    ensure_login(&page, &origin).await;
 
     println!(
         "开始：{} 倍速，完成阈值按路由配置。状态文件 {}",
@@ -151,7 +252,7 @@ pub async fn run(
                 resume_ticks += 1;
                 if resume_ticks > 20 {
                     println!("连续取不到状态，重新加载页面");
-                    let _ = page.goto(start_url).await;
+                    let _ = page.goto(&start_url).await;
                     resume_ticks = 0;
                 }
                 continue;
@@ -227,13 +328,14 @@ pub async fn run(
                             revive += 1;
                             store.save(&state_path)?;
                             println!("入口都被试过上限挡住了，已重置 {n} 项的重试计数，从头再来一轮（第 {revive} 次）");
-                            let _ = page.goto(start_url).await;
+                            let _ = page.goto(&start_url).await;
                             last_time = -1.0;
                             sleep(Duration::from_secs(3)).await;
                             continue;
                         }
                     }
                     println!("没有可进入的学习项，可能已全部完成。");
+                    println!("如果窗口里停的是首页/个人中心，请把「培训项目详情页」地址（列着全部课程、带「去学习」的那一页）填进设置再试。");
                     break;
                 }
             }
@@ -438,6 +540,67 @@ async fn advance(
 
 fn j<T: serde::Serialize>(v: T) -> String {
     serde_json::to_string(&v).unwrap_or_else(|_| "null".into())
+}
+
+/// 问一次服务端"当前是谁"，返回 yes / no / unknown。
+async fn login_state(page: &crate::browser::Page) -> &'static str {
+    if eval_json(page, LOGIN_PROBE_JS).await.is_err() {
+        return "unknown";
+    }
+    for _ in 0..20 {
+        sleep(Duration::from_millis(500)).await;
+        let raw = match eval_json(page, "JSON.stringify(window.__YKT_LOGIN||{})").await {
+            Ok(v) => v.as_str().unwrap_or("").to_string(),
+            Err(_) => continue,
+        };
+        let state = serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|v| v.get("state").and_then(|x| x.as_str()).map(|s| s.to_string()))
+            .unwrap_or_default();
+        match state.as_str() {
+            "yes" => return "yes",
+            "no" => return "no",
+            "unknown" => return "unknown",
+            _ => continue,
+        }
+    }
+    "unknown"
+}
+
+/// 确保处于登录态：未登录时把用户送回站点首页，等他登录完再继续。
+/// 站点允许匿名看课，所以这一步不能省略——否则"登录后才刷课"这条前提就不成立了。
+async fn ensure_login(page: &crate::browser::Page, origin: &str) {
+    loop {
+        match login_state(page).await {
+            "yes" => {
+                println!("已登录，开始刷课。");
+                return;
+            }
+            "no" => {
+                println!("检测到未登录：请在这个窗口里完成登录（扫码或账号密码），登录后会自动继续。");
+                if !origin.is_empty() {
+                    let _ = page.goto(&format!("{origin}/")).await;
+                }
+            }
+            _ => {
+                println!("无法确认登录状态（接口可能改版），按已登录继续。");
+                return;
+            }
+        }
+        // 等用户登录；期间不断复查
+        let mut waited = 0u32;
+        loop {
+            sleep(Duration::from_secs(3)).await;
+            waited += 1;
+            if login_state(page).await == "yes" {
+                println!("已登录，开始刷课。");
+                return;
+            }
+            if waited % 20 == 0 {
+                println!("仍在等待登录（已等 {} 秒）…", waited * 3);
+            }
+        }
+    }
 }
 
 fn trim_url(url: &str) -> String {

@@ -15,6 +15,7 @@ $sig = @'
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
 [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
 public struct RECT { public int Left, Top, Right, Bottom; }
 '@
 Add-Type -MemberDefinition $sig -Name Win -Namespace Cap
@@ -25,8 +26,10 @@ $h = $p.MainWindowHandle
 "pid=$($p.Id) title=$($p.MainWindowTitle)"
 
 if ([Cap.Win]::IsIconic($h)) { [Cap.Win]::ShowWindow($h, 9) | Out-Null; Start-Sleep -Milliseconds 800 }
+# 先钉到最上层：Windows 会阻止后台进程抢前台，只靠 SetForegroundWindow 常常截到别的窗口
+[Cap.Win]::SetWindowPos($h, [IntPtr]-1, 0, 0, 0, 0, 0x0001 -bor 0x0002 -bor 0x0040) | Out-Null
 [Cap.Win]::SetForegroundWindow($h) | Out-Null
-Start-Sleep -Milliseconds 900
+Start-Sleep -Milliseconds 1200
 
 $r = New-Object Cap.Win+RECT
 [Cap.Win]::GetWindowRect($h, [ref]$r) | Out-Null

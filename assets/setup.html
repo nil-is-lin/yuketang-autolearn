@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>雨课堂自动学习 · 设置</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    font: 14px/1.6 "Microsoft YaHei", system-ui, sans-serif;
+    background: linear-gradient(160deg, #eef3ff 0%, #f7f9fc 55%, #eaf0fb 100%);
+    color: #1f2430;
+  }
+  .card {
+    width: 640px; max-width: calc(100vw - 48px); background: #fff; border-radius: 14px;
+    box-shadow: 0 10px 30px rgba(31, 58, 120, .12); padding: 30px 34px 26px;
+  }
+  h1 { margin: 0 0 6px; font-size: 20px; display: flex; align-items: center; gap: 10px; }
+  .logo {
+    width: 30px; height: 30px; border-radius: 9px; flex: none;
+    background: linear-gradient(180deg, #4a7dff, #1a3aa8); color: #fff;
+    display: flex; align-items: center; justify-content: center; font-weight: 700;
+  }
+  .sub { color: #6b7280; font-size: 13px; margin-bottom: 22px; }
+  label { display: block; font-weight: 600; margin: 16px 0 6px; font-size: 13px; }
+  input[type=text] {
+    width: 100%; padding: 10px 12px; border: 1px solid #d8deea; border-radius: 8px;
+    font-size: 13px; outline: none; transition: border-color .15s, box-shadow .15s;
+  }
+  input[type=text]:focus { border-color: #4a7dff; box-shadow: 0 0 0 3px rgba(74,125,255,.14); }
+  .hint { color: #8a93a5; font-size: 12px; margin-top: 6px; }
+  .row { display: flex; gap: 14px; }
+  .row > div { flex: 1; }
+  select {
+    width: 100%; padding: 10px 12px; border: 1px solid #d8deea; border-radius: 8px;
+    font-size: 13px; background: #fff; outline: none;
+  }
+  .actions { display: flex; align-items: center; gap: 14px; margin-top: 24px; }
+  button {
+    padding: 11px 22px; border: 0; border-radius: 9px; font-size: 14px; font-weight: 600;
+    color: #fff; cursor: pointer; background: linear-gradient(180deg, #4a7dff, #2f5ce0);
+    box-shadow: 0 4px 12px rgba(47,92,224,.25);
+  }
+  button:active { transform: translateY(1px); }
+  button.ghost {
+    background: #fff; color: #4a5568; border: 1px solid #d8deea; box-shadow: none; font-weight: 500;
+  }
+  .warn {
+    margin-top: 18px; padding: 10px 12px; border-radius: 8px; font-size: 12px;
+    background: #fff8e6; color: #8a6100; border: 1px solid #ffe3a3;
+  }
+  .err { color: #d93025; font-size: 12px; margin-top: 8px; min-height: 16px; }
+</style>
+</head>
+<body>
+  <form class="card" id="f">
+    <h1><span class="logo">学</span>雨课堂自动学习</h1>
+    <div class="sub">把「培训项目详情页」地址贴进来，就是列着全部课程、每行带「去学习」的那一页。</div>
+
+    <label for="url">培训项目详情页地址</label>
+    <input id="url" type="text" spellcheck="false" value="__PREFILL__"
+           placeholder="https://<你的学校域名>/pro/trainingproject/mytraining/detail/<编号>">
+    <div class="hint">地址栏里的地址直接复制过来即可；跑过一次后会记住，下次不用再填。</div>
+
+    <div class="row">
+      <div>
+        <label for="rate">播放倍速</label>
+        <select id="rate">
+          <option value="1">1.0 倍（最保守）</option>
+          <option value="1.25">1.25 倍</option>
+          <option value="1.5">1.5 倍</option>
+          <option value="2" selected>2.0 倍（推荐，平台上限）</option>
+        </select>
+      </div>
+      <div>
+        <label for="login">登录态</label>
+        <select id="login">
+          <option value="0" selected>本次不保存（退出即清除）</option>
+          <option value="1">记住登录，下次免登录</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="err" id="err"></div>
+    <div class="actions">
+      <button type="button" id="go">开始刷课</button>
+      <button type="button" class="ghost" id="quit">退出</button>
+    </div>
+
+    <div class="warn">
+      仅供个人学习与自动化技术研究：请确认平台服务条款允许此类操作，账号风险自负。
+      是否完成学时最终由平台判定，不要用它代替真正的学习。
+    </div>
+  </form>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const err = $("err");
+
+  // 上次的倍速回填（Rust 侧把 __RATE__ 换成实际值）
+  (function () {
+    const wanted = Number("__RATE__");
+    if (!wanted) return;
+    const sel = $("rate");
+    let best = null, diff = 1e9;
+    for (const opt of sel.options) {
+      const d = Math.abs(parseFloat(opt.value) - wanted);
+      if (d < diff) { diff = d; best = opt; }
+    }
+    if (best) sel.value = best.value;
+  })();
+
+  $("f").addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const url = $("url").value.trim();
+    if (!/^https?:\/\//i.test(url)) {
+      err.textContent = "请填完整的 http(s) 地址。";
+      return;
+    }
+    err.textContent = "";
+    const payload = {
+      action: "start",
+      url: url,
+      rate: parseFloat($("rate").value) || 2,
+      keepLogin: $("login").value === "1",
+    };
+    if (window.chrome && window.chrome.webview) {
+      window.chrome.webview.postMessage(payload);
+    }
+  });
+
+  $("quit").addEventListener("click", () => {
+    if (window.chrome && window.chrome.webview) {
+      window.chrome.webview.postMessage({ action: "quit" });
+    }
+  });
+
+  $("url").focus();
+</script>
+</body>
+</html>

@@ -16,7 +16,20 @@ complete_pct = 99.0
 label = "培训项目首页"
 path_prefix = "/trainingproject/mytraining/index"
 kind = "entry"
-entry_selectors = []
+entry_selectors = [
+  "text:进入培训班|继续学习|去学习|开始学习|进入学习",
+  "[class*=train] [class*=enter]",
+]
+complete_pct = 99.0
+
+[[routes]]
+label = "站点首页/个人中心（从「我参加的培训」点进培训班）"
+path_prefix = "/"
+kind = "entry"
+entry_selectors = [
+  "text:进入培训班|继续学习|去学习|开始学习|进入学习",
+  "[class*=train] [class*=enter]",
+]
 complete_pct = 99.0
 
 [[routes]]

@@ -22,7 +22,7 @@ use webview2_com::{
     AddScriptToExecuteOnDocumentCreatedCompletedHandler, CoTaskMemPWSTR,
     CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler,
     ExecuteScriptCompletedHandler, NavigationCompletedEventHandler, NavigationStartingEventHandler,
-    NewWindowRequestedEventHandler,
+    NewWindowRequestedEventHandler, WebMessageReceivedEventHandler,
 };
 use windows::core::{BOOL, PCWSTR, PWSTR, w};
 use windows::Win32::Foundation::{E_POINTER, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -63,6 +63,11 @@ enum Req {
         url: String,
         reply: oneshot::Sender<Result<()>>,
     },
+    /// 用页面内 HTML 当界面（设置页就是这么做出来的，省得引 GUI 框架）
+    Html {
+        html: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
     Zoom(f64),
     Quit,
 }
@@ -73,6 +78,8 @@ pub struct Web {
     tx: Sender<Req>,
     /// 当前缩放系数，所有克隆共享一份；自适应缩放要拿它做基准
     zoom: Arc<AtomicU64>,
+    /// 页面 postMessage 过来的消息（设置页提交就是走这条路）
+    inbox: Arc<Mutex<Vec<String>>>,
 }
 
 impl Web {
@@ -138,12 +145,21 @@ impl Session {
         let (tx, rx) = mpsc::channel();
         let initial = if zoom > 0.0 { zoom.clamp(0.3, 2.0) } else { 1.0 };
         let zoom_cell = Arc::new(AtomicU64::new(initial.to_bits()));
+        let inbox: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let inbox_worker = inbox.clone();
         let profile = profile.clone();
         let browser_folder = browser_folder.map(|s| s.to_string());
         let worker = thread::Builder::new()
             .name("webview2-sta".into())
             .spawn(move || {
-                if let Err(e) = run(rx, &profile, browser_folder.as_deref(), window, initial) {
+                if let Err(e) = run(
+                    rx,
+                    &profile,
+                    browser_folder.as_deref(),
+                    window,
+                    initial,
+                    inbox_worker,
+                ) {
                     eprintln!("WebView2 线程退出：{e:#}");
                 }
             })
@@ -152,6 +168,7 @@ impl Session {
             web: Web {
                 tx,
                 zoom: zoom_cell,
+                inbox,
             },
             worker: Some(worker),
         })
@@ -209,6 +226,26 @@ impl Web {
             reply,
         })
         .await
+    }
+
+    /// 用一段 HTML 当界面（设置页）。不需要本地文件、也不需要起 http 服务。
+    pub async fn show_html(&self, html: &str) -> Result<()> {
+        self.request(|reply| Req::Html {
+            html: html.to_string(),
+            reply,
+        })
+        .await
+    }
+
+    /// 取出页面用 postMessage 发过来的消息（JSON 文本）。设置页提交走这条路。
+    pub fn take_message(&self) -> Option<String> {
+        self.inbox.lock().ok().and_then(|mut q| {
+            if q.is_empty() {
+                None
+            } else {
+                Some(q.remove(0))
+            }
+        })
     }
 
     pub async fn add_init_script(&self, js: &str) -> Result<()> {
@@ -374,6 +411,7 @@ fn run(
     browser_folder: Option<&str>,
     window: (u32, u32),
     zoom: f64,
+    inbox: Arc<Mutex<Vec<String>>>,
 ) -> Result<()> {
     let hwnd = unsafe {
         // 已经初始化过 COM 的线程会返回 RPC_E_CHANGED_MODE，这里不需要区分
@@ -548,6 +586,29 @@ fn run(
         webview.add_NewWindowRequested(&popup_handler, &mut new_window_token)?;
     }
 
+    // 页面里的 postMessage：设置页点「开始刷课」就是靠它把地址和倍速传回来。
+    // 这里只负责收，解析交给 tokio 侧（它更清楚接下来该干什么）。
+    let mut msg_token = 0i64;
+    let msg_inbox = inbox.clone();
+    let msg_handler = WebMessageReceivedEventHandler::create(Box::new(move |_sender, args| {
+        if let Some(args) = args {
+            let mut text = PWSTR::null();
+            unsafe {
+                let _ = args.WebMessageAsJson(&mut text);
+            }
+            let raw = unsafe { text.to_string() }.unwrap_or_default();
+            if !raw.is_empty() {
+                if let Ok(mut q) = msg_inbox.lock() {
+                    q.push(raw);
+                }
+            }
+        }
+        Ok(())
+    }));
+    unsafe {
+        webview.add_WebMessageReceived(&msg_handler, &mut msg_token)?;
+    }
+
     // 导航事件日志：页面"看着进去了却一直求不到值"时，只有看这两个事件才知道
     // 是导航没完成、还是被重定向到登录/错误页。
     let mut nav_start_token = 0i64;
@@ -558,7 +619,12 @@ fn run(
                 let _ = args.Uri(&mut uri);
                 uri.to_string().unwrap_or_default()
             };
-            println!("[导航开始] {text}");
+            // 内置页面是 data: URL，整段打出来会把日志刷爆
+            if text.starts_with("data:") {
+                println!("[导航开始] 内置页面（设置页）");
+            } else {
+                println!("[导航开始] {text}");
+            }
         }
         Ok(())
     }));
@@ -837,6 +903,15 @@ fn handle(req: Req, webview: &ICoreWebView2) {
         }
         Req::Navigate { url, reply } => {
             let result = navigate(&webview, &url);
+            let _ = reply.send(result);
+        }
+        Req::Html { html, reply } => {
+            let text = CoTaskMemPWSTR::from(html.as_str());
+            let result = unsafe {
+                webview
+                    .NavigateToString(*text.as_ref().as_pcwstr())
+                    .map_err(|e| anyhow!("打开内置页面失败：{e}"))
+            };
             let _ = reply.send(result);
         }
         Req::Zoom(value) => {
