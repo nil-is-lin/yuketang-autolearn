@@ -122,16 +122,24 @@ Get-FileHash .\yuketang-autolearn-v1.0.0-windows-x64.exe -Algorithm SHA256
 
 MIT，见 [LICENSE](LICENSE)。
 
-## 构建
+## 构建与发版
 
 ```powershell
 cargo build --release
 # 产物：target\release\yuketang-autolearn.exe
 ```
 
-README 的「下载」用的是 CI 产物：打 tag（`v1.0.0`）会自动触发
-`.github/workflows/release.yml`，在 windows-latest 上跑测试、构建、
-生成 `SHA256SUMS.txt` 并把 exe 挂到 GitHub Release。
+发布新版本（构建 → 打包 → 打 tag → 推送 → 创建 Release，只用 `repo` 权限）：
+
+```powershell
+pwsh -File scripts\release.ps1 -DryRun   # 先看看产物
+pwsh -File scripts\release.ps1           # 正式发版
+```
+
+为什么不用 CI 自动发版：GitHub Actions 需要 token 具备 `workflow` 权限，而设备码授权
+在部分网络下连不到 `github.com/login/device/code`。本机构建 + `gh release create`
+效果一样；想启用 CI 的话，把 `scripts/github-release-workflow.yml` 放到
+`.github/workflows/release.yml` 即可（前提是 token 已带 `workflow` 权限）。
 
 图标和版本信息由 `build.rs` + `winresource` 在构建时写进资源段（需要 rc.exe，
 在 Windows SDK 的 bin 目录下；没找到只会警告，不影响运行）。
