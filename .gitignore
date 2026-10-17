@@ -1,0 +1,18 @@
+# 构建产物
+target/
+*.exe
+
+# 运行期数据：登录态、断点状态、抓包快照
+profile/
+state/
+dumps/
+dumps*/
+session-*/
+
+# 日志与截图（常含真实姓名、单位、课程信息，绝不入库）
+*.log
+*.png
+
+# 各平台杂项
+.DS_Store
+Thumbs.db

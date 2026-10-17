@@ -1,0 +1,83 @@
+# 雨课堂适配器。路由来自 1.3.322 版前端 bundle 里的路由表（静态可查），
+# 但 entry_selectors / dismiss_selectors 必须用 `probe` 跑真实登录页才能填准。
+
+name = "雨课堂"
+domains = ["yuketang.cn", "gdufemooc.cn"]
+
+[[routes]]
+label = "培训项目详情（列出课程/班级入口）"
+path_prefix = "/trainingproject/mytraining/detail/"
+kind = "entry"
+entry_selectors = ["text:去学习|开始学习|进入学习|继续学习"]
+dismiss_selectors = []
+complete_pct = 99.0
+
+[[routes]]
+label = "培训项目首页"
+path_prefix = "/trainingproject/mytraining/index"
+kind = "entry"
+entry_selectors = []
+complete_pct = 99.0
+
+[[routes]]
+label = "学习内容（OCS 同款路由，视频在这里）"
+path_prefix = "/v2/web/studentLog"
+kind = "learn"
+entry_selectors = []
+dismiss_selectors = []
+complete_pct = 99.0
+
+[[routes]]
+label = "培训课程内容页（章节目录 + 视频同页）"
+path_prefix = "/pro/lms/"
+kind = "entry"
+entry_selectors = [
+  ".chapter-list .leaf-detail",
+  ".el-tooltip.leaf-detail",
+  ".study-content__container [class*=item]",
+  ".lesson-student__route [class*=chapter]",
+]
+dismiss_selectors = []
+complete_pct = 99.0
+
+[[routes]]
+label = "学习空间/播放器页（右侧目录可以直接切下一个视频）"
+path_prefix = "/ai-workspace/lms-graph/"
+kind = "learn"
+entry_selectors = [".leaf-item", ".nav-item-leaf-box"]
+dismiss_selectors = []
+complete_pct = 99.0
+
+[[routes]]
+label = "课堂/回放界面"
+path_prefix = "/v2/web/student-lesson-report"
+kind = "learn"
+entry_selectors = []
+complete_pct = 99.0
+
+[[routes]]
+label = "雨课堂课程列表"
+path_prefix = "/v2/web/index"
+kind = "entry"
+entry_selectors = []
+complete_pct = 99.0
+
+[[routes]]
+label = "AI 学伴课程"
+path_prefix = "/ai-workspace/lms-graph"
+kind = "learn"
+entry_selectors = []
+complete_pct = 99.0
+
+[[routes]]
+label = "未识别页面（只探测不动作）"
+path_prefix = ""
+kind = "unknown"
+complete_pct = 99.0
+
+# verify 子命令用来在真实请求里认接口的 URL 片段。
+# 雨课堂有几个变体（v1 mooc-api、长江、学校镜像），路径不完全一样，
+# 抓不到就把你们学校实际的那条加进来，别改代码。
+[watch]
+heartbeat_url = ["video-log/heartbeat", "/heartbeat/"]
+progress_url = ["video-log/get_video_watch_progress", "watch_progress", "video-log/detail"]
