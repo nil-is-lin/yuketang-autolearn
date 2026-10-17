@@ -598,6 +598,8 @@ fn run(
             }
             let raw = unsafe { text.to_string() }.unwrap_or_default();
             if !raw.is_empty() {
+                // 消息内容记一笔：设置页"自己提交"这类怪事全靠它定位
+                println!("[页面消息] {}", raw.chars().take(200).collect::<String>());
                 if let Ok(mut q) = msg_inbox.lock() {
                     q.push(raw);
                 }

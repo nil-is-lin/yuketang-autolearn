@@ -79,7 +79,7 @@ pub async fn run(
             let html = SETUP_HTML.replace("__PREFILL__", &prefill)
                 .replace("__RATE__", &format!("{}", saved.rate));
             page.show_html(&html).await?;
-            println!("已打开设置页：请在窗口里填培训项目详情页地址，然后点「开始刷课」。");
+            println!("已打开设置页：确认倍速/登录方式后，点「开始刷课」。");
             let mut picked: Option<(String, f64)> = None;
             loop {
                 sleep(Duration::from_millis(400)).await;
@@ -373,7 +373,9 @@ pub async fn run(
                 );
                 // 有些课（没购买/没选课/资源下线）根本没有可用媒体源，
                 // 再怎么点也是同一个错，死磕只会把整晚耗掉。
-                let no_source = err.contains("no supported sources") || err.contains("NotSupportedError");
+                let no_source = err.contains("no supported sources")
+                    || err.contains("NotSupportedError")
+                    || err.contains("empty-source");
                 let limit = if no_source { 4 } else { 10 };
                 if play_fail >= limit {
                     println!("这一项连续 {play_fail} 次播不起来（{err}），跳过它，稍后再回来补");

@@ -441,19 +441,24 @@
           rate: v.playbackRate,
           muted: v.muted,
           rs: v.readyState,
+          dur: isFinite(v.duration) ? v.duration : 0,
         }
       : null;
+    // 只认"真的能播"：没有时长、readyState 还是 0，说明媒体根本没加载成功。
+    // 之前只看 paused===false，会把"空壳播放器"当成已开播，然后整晚原地空转。
+    const emptySource = !st || (st.dur <= 0 && st.rs <= 0);
     return {
-      started: !!(st && st.paused === false),
+      started: !!(st && st.paused === false && !emptySource),
       via: clicked ? "shell-click" : "media",
       clicked,
       shells: sh.length,
       rate: st ? st.rate : r.rate,
       paused: st ? st.paused : true,
       cur: st ? st.cur : 0,
+      dur: st ? st.dur : 0,
       rs: st ? st.rs : -1,
       muted: st ? st.muted : true,
-      err: r.err || "",
+      err: r.err || (emptySource ? "empty-source" : ""),
     };
   };
 

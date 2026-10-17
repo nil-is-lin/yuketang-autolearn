@@ -30,6 +30,16 @@
   }
   input[type=text]:focus { border-color: #4a7dff; box-shadow: 0 0 0 3px rgba(74,125,255,.14); }
   .hint { color: #8a93a5; font-size: 12px; margin-top: 6px; }
+  .platform {
+    display: flex; align-items: center; gap: 8px; margin-top: 18px;
+    padding: 10px 12px; border: 1px solid #e2e8f4; border-radius: 9px; background: #f7f9ff;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #34a853; flex: none; }
+  .purl { font-family: Consolas, monospace; font-size: 13px; color: #2b3a55; }
+  .ptag {
+    margin-left: auto; font-size: 11px; color: #4a7dff; background: #e8efff;
+    border-radius: 20px; padding: 2px 10px;
+  }
   .row { display: flex; gap: 14px; }
   .row > div { flex: 1; }
   select {
@@ -56,12 +66,13 @@
 <body>
   <form class="card" id="f">
     <h1><span class="logo">学</span>雨课堂自动学习</h1>
-    <div class="sub">把「培训项目详情页」地址贴进来，就是列着全部课程、每行带「去学习」的那一页。</div>
+    <div class="sub">「四有导师学院」是全国统一的平台入口，所有学校共用一个网址；你在哪个学校、哪个培训班，由你的账号决定。</div>
 
-    <label for="url">培训项目详情页地址</label>
-    <input id="url" type="text" spellcheck="false" value="__PREFILL__"
-           placeholder="https://<你的学校域名>/pro/trainingproject/mytraining/detail/<编号>">
-    <div class="hint">地址栏里的地址直接复制过来即可；跑过一次后会记住，下次不用再填。</div>
+  <div class="platform">
+    <span class="dot"></span>
+    <span class="purl">acgecfd.yuketang.cn</span>
+    <span class="ptag">统一入口</span>
+  </div>
 
     <div class="row">
       <div>
@@ -111,23 +122,32 @@
     if (best) sel.value = best.value;
   })();
 
-  $("f").addEventListener("submit", (ev) => {
-    ev.preventDefault();
-    const url = $("url").value.trim();
-    if (!/^https?:\/\//i.test(url)) {
-      err.textContent = "请填完整的 http(s) 地址。";
+  // 平台地址由 Rust 侧注入；页面不展示输入框，避免用户以为要自己找地址
+  const PLATFORM_URL = "__PREFILL__";
+
+  function start() {
+    if (!/^https?:\/\//i.test(PLATFORM_URL)) {
+      err.textContent = "内部地址缺失，请重新启动程序。";
       return;
     }
     err.textContent = "";
     const payload = {
       action: "start",
-      url: url,
+      url: PLATFORM_URL,
       rate: parseFloat($("rate").value) || 2,
       keepLogin: $("login").value === "1",
     };
     if (window.chrome && window.chrome.webview) {
       window.chrome.webview.postMessage(payload);
     }
+  }
+
+  // 按钮是 type=button，必须直接绑 click；绑在 form 的 submit 上不会触发
+  $("go").addEventListener("click", start);
+  // 回车也走同一条路（表单默认提交被拦掉）
+  $("f").addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    start();
   });
 
   $("quit").addEventListener("click", () => {
@@ -135,8 +155,6 @@
       window.chrome.webview.postMessage({ action: "quit" });
     }
   });
-
-  $("url").focus();
 </script>
 </body>
 </html>

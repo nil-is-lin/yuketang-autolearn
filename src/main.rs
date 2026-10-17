@@ -43,26 +43,6 @@ struct Cli {
     cmd: Option<Cmd>,
 }
 
-/// 起点地址的解析顺序：命令行 → 上次跑过的地址 → 环境变量。
-/// 刻意不内置任何学校/课程地址：仓库是公共的，把某个学校的内网入口写死在代码里
-/// 既没意义也泄露信息。第一次用请自己给 --url，之后就记在 state/last_url.txt 里。
-fn resolve_entry(explicit: Option<String>) -> Option<String> {
-    if let Some(u) = explicit {
-        return Some(u);
-    }
-    let last = Path::new("state").join("last_url.txt");
-    if let Ok(s) = std::fs::read_to_string(&last) {
-        let s = s.trim().to_string();
-        if s.starts_with("http") {
-            return Some(s);
-        }
-    }
-    std::env::var("YKT_ENTRY").ok().filter(|s| s.starts_with("http"))
-}
-
-/// 编译进二进制的适配器，缺 adapters 目录时兜底；磁盘上的同名文件优先（方便平台改版时热改）。
-const BUILTIN_ADAPTERS: &[(&str, &str)] =
-    &[("yuketang.toml", include_str!("../adapters/yuketang.toml"))];
 
 #[derive(Subcommand)]
 enum Cmd {
@@ -194,7 +174,13 @@ async fn run(cli: Cli, profile: PathBuf, ephemeral: bool) -> anyhow::Result<()> 
             if rate > 2.0 {
                 println!("警告：倍速 {rate} 超过平台播放器上限 2.0，心跳增量会显得不合常理，有被判异常并清空进度的风险");
             }
-            let url = resolve_entry(url);
+            // 只有显式给了 --url（或环境变量）才跳过设置页；
+            // 否则每次都先把设置页摆出来，让用户确认地址/倍速，避免"悄悄用上次的地址开跑"。
+            let url = url.or_else(|| {
+                std::env::var("YKT_ENTRY")
+                    .ok()
+                    .filter(|s| s.starts_with("http"))
+            });
             let adapters_dir = cli.adapters.clone();
             player::run(url, &adapters_dir, &Path::new("state"), &profile, cli.browser.as_deref(), cli.zoom, rate, max).await
         }
@@ -259,35 +245,8 @@ async fn run(cli: Cli, profile: PathBuf, ephemeral: bool) -> anyhow::Result<()> 
     }
 }
 
-
 fn load_adapter(dir: &Path, url: &str) -> anyhow::Result<Adapter> {
-    let parsed: url::Url = url.parse()?;
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("toml") {
-                candidates.push(path);
-            }
-        }
-    }
-    for path in &candidates {
-        match Adapter::load(path) {
-            Ok(adapter) if adapter.handles(&parsed) => return Ok(adapter),
-            Ok(_) => {}
-            Err(e) => println!("跳过适配器 {}：{e}", path.display()),
-        }
-    }
-    // 只发一个 exe 时没有 adapters 目录，用编译进去的那份兜底。
-    for (name, text) in BUILTIN_ADAPTERS {
-        let adapter = Adapter::parse(text, name)?;
-        if adapter.handles(&parsed) {
-            return Ok(adapter);
-        }
-    }
-    anyhow::bail!(
-        "没有适配器匹配 {url}。已加载：{:?}\n请在 {} 下新建 toml，把域名加进去。",
-        candidates,
-        dir.display()
-    )
+    // 具体挑哪个适配器交给 Adapter::load_for：磁盘优先、内置兜底
+    Adapter::load_for(dir, url)
 }
+
