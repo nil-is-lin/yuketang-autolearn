@@ -494,20 +494,33 @@
     return { dismissed: hit };
   };
 
-  // 选择器除了 CSS 串，还支持 "text:去学习|开始学习" —— 按按钮文字找入口。
-  // 雨课堂课程表里 24 行都叫"去学习"，所以标签取所在行的正文，序号才是身份。
-  const rowLabel = (el) => {
+  // 行正文里混着"必修 1.9 0 27% 去学习"这类会变的部分。两个用途必须分开：
+  //   rowTextOf(el) —— 原始整行文字，交给"是否已完成"判定（百分比/已完成写在行上）
+  //   rowLabel(el)  —— 去掉会变的百分比和动作词，作为课程身份（状态/认领文件按它哈希）
+  // 两者共用原始文字时，进度一变课程就换身份：认领失配、完成标记对不上，
+  // 表现就是同一门课反复刷、该刷的那门接不上。
+  const rowTextOf = (el) => {
     let n = el;
     for (let i = 0; i < 8 && n.parentElement; i++) {
       n = n.parentElement;
       const tag = n.tagName.toLowerCase();
       if (tag === "tr" || tag === "li" || /row|item|card|lesson|chapter|course/.test(n.className || "")) {
-        const t = text(n, 50);
+        const t = text(n, 120);
         if (t) return t;
       }
     }
-    return text(el, 50);
+    return text(el, 120);
   };
+
+  const stableLabel = (raw) =>
+    (raw || "")
+      .replace(/\d{1,3}(?:\.\d+)?\s*%/g, " ")
+      .replace(/去学习|继续学习|开始学习|进入学习|已学完|已完成|已观看|完成学习/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  // 兜底：整行取不到稳定文字时用元素路径，至少保证不同课程不会撞成同一个身份
+  const rowLabel = (el) => stableLabel(rowTextOf(el)).slice(0, 50) || cssPath(el);
 
   const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -534,7 +547,7 @@
       } else {
         nodes = all.flatMap((d) => q(d, sel)).filter(visible);
       }
-      for (const el of nodes) out.push({ el, label: rowLabel(el) });
+      for (const el of nodes) out.push({ el, label: rowLabel(el), raw: rowTextOf(el) });
     }
     // 同一个元素常被多条选择器命中（例如 .leaf-detail 与 .chapter-list .leaf-detail），
     // 不去重的话序号 i 与 DOM 顺序对不上，点"下一个"会点到已点过的。
@@ -564,14 +577,18 @@
   // 只看元素自身文字会把已完成的课当成没学，一遍遍点进去。
   const entries = (selectors) =>
     collect(selectors).map((item, i) => {
-      const rowText = ((item.label || "") + " " + ((item.el.innerText || "") + ""))
+      // 判定"已完成"要用原始整行文字：百分比和"已完成"都写在行上，
+      // 稳定标签（item.label）里这些已经被去掉了，只看它会永远判成没学。
+      const rowText = ((item.raw || "") + " " + (item.label || "") + " " + ((item.el.innerText || "") + ""))
         .replace(/\s+/g, " ")
         .trim();
       const m = rowText.match(/(\d{1,3}(?:\.\d+)?)\s*%/);
       const rowPct = m ? parseFloat(m[1]) : -1;
+      // 注意别把"请在 2026-10-31 前完成学习"里的"完成学习"当成已完成，
+      // 几乎所有行都有这句截止时间，误判会让每一门课都被跳过。
       const done =
         rowPct >= 99.5 ||
-        /已学完|已完成|已观看|完成学习|complete|finished/i.test(
+        /已学完|已完成|已观看|(?<!前)完成学习|complete|finished/i.test(
           rowText + " " + (typeof item.el.className === "string" ? item.el.className : "")
         );
       return {

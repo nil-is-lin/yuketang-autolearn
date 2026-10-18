@@ -69,6 +69,10 @@ enum Cmd {
         /// 这次最多刷完几项，0 = 刷到没有下一项为止（默认）
         #[arg(long, default_value_t = 0)]
         max: usize,
+        /// 分片：项目页上的课程按序号取模切成 N 份，本实例只刷第 K 份（K 从 1 起）。
+        /// 例：一个窗口 --shard 1/2、另一个 --shard 2/2，两路各刷一半课程并行推进
+        #[arg(long, value_name = "K/N")]
+        shard: Option<String>,
     },
     /// 抓一条真实心跳 payload，改步进后在页面里回放，比对进度接口的变化
     Verify {
@@ -113,7 +117,7 @@ fn main() -> anyhow::Result<()> {
     logging::install(true);
     let mut cli = Cli::parse();
     if cli.cmd.is_none() {
-        cli.cmd = Some(Cmd::Learn { url: None, rate: 2.0, max: 0 });
+        cli.cmd = Some(Cmd::Learn { url: None, rate: 2.0, max: 0, shard: None });
     }
     // 登录态策略：默认每次启动都要重新登录（一次性会话目录，退出即删）。
     // 只有在设置页选过「记住登录」、或者命令行显式 --keep-login 时才复用。
@@ -166,7 +170,7 @@ async fn run(cli: Cli, profile: PathBuf, ephemeral: bool) -> anyhow::Result<()> 
         Cmd::Probe { url, out, max_pages, auto_click } => {
             probe::run(&url, &out, &profile, cli.browser.as_deref(), max_pages, cli.zoom, &auto_click).await
         }
-        Cmd::Learn { url, rate, max } => {
+        Cmd::Learn { url, rate, max, shard } => {
             anyhow::ensure!(
                 (0.5..=4.0).contains(&rate),
                 "倍速 {rate} 超出允许范围 0.5~4.0"
@@ -181,8 +185,12 @@ async fn run(cli: Cli, profile: PathBuf, ephemeral: bool) -> anyhow::Result<()> 
                     .ok()
                     .filter(|s| s.starts_with("http"))
             });
+            let shard = match shard.as_deref() {
+                Some(s) => Some(parse_shard(s)?),
+                None => None,
+            };
             let adapters_dir = cli.adapters.clone();
-            player::run(url, &adapters_dir, &Path::new("state"), &profile, cli.browser.as_deref(), cli.zoom, rate, max).await
+            player::run(url, &adapters_dir, &Path::new("state"), &profile, cli.browser.as_deref(), cli.zoom, rate, max, shard).await
         }
         Cmd::Verify { url, samples, wait, peek } => {
             let adapter = load_adapter(&cli.adapters, &url)?;
@@ -248,5 +256,26 @@ async fn run(cli: Cli, profile: PathBuf, ephemeral: bool) -> anyhow::Result<()> 
 fn load_adapter(dir: &Path, url: &str) -> anyhow::Result<Adapter> {
     // 具体挑哪个适配器交给 Adapter::load_for：磁盘优先、内置兜底
     Adapter::load_for(dir, url)
+}
+
+/// 解析 `K/N`：K 是这份分片的序号（1 起），N 是总分片数。
+///
+/// 分片是为了让多个窗口并行刷同一个培训项目：项目页上的课程按顺序取模分配，
+/// 第 K 份只点 `序号 % N == K-1` 的课。课程内部的章节不受影响，仍然整门刷完。
+fn parse_shard(s: &str) -> anyhow::Result<(u32, u32)> {
+    let (k, n) = s
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("分片写法是 K/N，例如 --shard 1/2，收到的是 {s}"))?;
+    let k: u32 = k
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("分片序号 {k} 不是数字"))?;
+    let n: u32 = n
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("分片总数 {n} 不是数字"))?;
+    anyhow::ensure!(n >= 2, "分片总数至少要是 2；只跑一路就别加 --shard");
+    anyhow::ensure!((1..=n).contains(&k), "分片序号要落在 1~{n} 之间，收到 {k}");
+    Ok((k, n))
 }
 

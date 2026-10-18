@@ -4,6 +4,7 @@ target/
 
 # 运行期数据：登录态、断点状态、抓包快照
 profile/
+profile-lite/
 state/
 dumps/
 dumps*/

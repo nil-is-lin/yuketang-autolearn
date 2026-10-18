@@ -1,7 +1,7 @@
 use crate::adapter::Adapter;
 use crate::browser::{self, eval_json};
 use crate::state::{Status, Store};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
@@ -59,15 +59,44 @@ pub async fn run(
     zoom: f64,
     rate: f64,
     max_items: usize,
+    shard: Option<(u32, u32)>,
 ) -> anyhow::Result<()> {
     let mut session = browser::Session::launch(profile, browser_path, (1360, 900), zoom).await?;
     let page = session.page();
 
     // 没有地址就先把设置页摆出来：地址、倍速、要不要记住登录，都让用户点。
     // 用 WebView2 自己渲染 HTML，不引 GUI 框架，也不用写配置文件。
+    //
+    // 例外是多开分片：第二路、第三路就是为了并行推进同一个项目，让每一路都停下来
+    // 点一次「开始刷课」纯属多余——直接沿用上次保存的地址和倍速开跑。
     let mut chosen_rate = rate;
+    let auto_start = shard.is_some();
     let mut start_url = match start_url {
         Some(u) => u,
+        None if auto_start => {
+            let cfg = crate::state::Config::load(&Store::path(state_dir, "config"));
+            if cfg.url.starts_with("http") {
+                println!(
+                    "多开分片：沿用上次的地址 {} （倍速 x{}），不再弹设置页。",
+                    cfg.url, cfg.rate
+                );
+                chosen_rate = cfg.rate;
+                cfg.url
+            } else {
+                // 一次都没跑过，没有可沿用的地址，只能退回去让用户填
+                match show_setup(&page, state_dir, false).await {
+                    SetupResult::Start { url, rate, .. } => {
+                        chosen_rate = rate;
+                        url
+                    }
+                    _ => {
+                        println!("已退出。");
+                        session.close().await;
+                        return Ok(());
+                    }
+                }
+            }
+        }
         None => match show_setup(&page, state_dir, false).await {
             SetupResult::Start { url, rate, .. } => {
                 chosen_rate = rate;
@@ -93,7 +122,11 @@ pub async fn run(
         stall_limit: Duration::from_secs(60),
     };
 
-    let key = format!("{:08x}", fnv(&start_url));
+    // 分片各记各的账：两路共用一份状态文件会互相覆盖 attempts 和完成标记
+    let key = match shard {
+        Some((k, _)) => format!("{:08x}-s{k}", fnv(&start_url)),
+        None => format!("{:08x}", fnv(&start_url)),
+    };
     let state_path = Store::path(state_dir, &key);
     let mut store = Store::load(&state_path);
     store.url = start_url.to_string();
@@ -108,6 +141,18 @@ pub async fn run(
     if std::fs::create_dir_all(state_dir).is_ok() {
         let _ = std::fs::write(state_dir.join("last_url.txt"), &start_url);
     }
+
+    // 分片只在起始页那一层生效：这一层列的是课程，点进去以后的章节列表不能也切一半，
+    // 否则每门课都会漏掉一半内容。用「路径和起始页相同」来认定还站在这一层。
+    let start_parsed = start_url.parse::<url::Url>()?;
+    let start_path = start_parsed.path().trim_end_matches('/').to_string();
+    if let Some((k, n)) = shard {
+        println!(
+            "分片 {k}/{n}：与其它分片通过 state\\claims 认领课程，谁先认领谁刷，不会重复"
+        );
+    }
+    // 认领文件里记的是本路编号：自己的课允许回头补，别人的课不碰
+    let lane_id = shard.map(|(k, _)| k).unwrap_or(0);
 
     let page = session.new_page(&start_url).await?;
     let _ = page.add_init_script(PLAYER_JS).await;
@@ -219,6 +264,9 @@ pub async fn run(
             .unwrap_or_else(|| vec!["[class*=chapter] li".into(), "[class*=catalog] li".into()]);
         let threshold = route.map(|r| r.complete_pct).unwrap_or(99.0);
         let is_entry_page = matches!(route.map(|r| r.kind), Some(crate::adapter::RouteKind::Entry));
+        // 还站在起始页（项目详情页）那一层吗：分片挑课只在这一层做
+        let is_top = parsed.host_str() == start_parsed.host_str()
+            && parsed.path().trim_end_matches('/') == start_path;
 
         let _ = eval_json(&page, &format!("window.__YKT.dismiss({})", j(dismiss))).await;
 
@@ -261,7 +309,7 @@ pub async fn run(
                 println!("已处理 {finished} 项，达到上限，结束。");
                 break;
             }
-            match advance(&page, &mut store, &entries_sel, &state_path).await {
+            match advance(&page, &mut store, &entries_sel, &state_path, is_top, shard).await {
                 Some(entry) => {
                     no_media = 0;
                     exhausted = 0;
@@ -311,8 +359,15 @@ pub async fn run(
                             continue;
                         }
                     }
-                    println!("没有可进入的学习项，可能已全部完成。");
-                    println!("如果窗口里停的是首页/个人中心，请把「培训项目详情页」地址（列着全部课程、带「去学习」的那一页）填进设置再试。");
+                    match shard {
+                        Some((k, n)) if is_top => {
+                            println!("分片 {k}/{n} 已经没有归属的可刷课程，这一路收工；等另一路跑完就是全部完成。")
+                        }
+                        _ => {
+                            println!("没有可进入的学习项，可能已全部完成。");
+                            println!("如果窗口里停的是首页/个人中心，请把「培训项目详情页」地址（列着全部课程、带「去学习」的那一页）填进设置再试。");
+                        }
+                    }
                     break;
                 }
             }
@@ -357,10 +412,12 @@ pub async fn run(
                 if play_fail >= limit {
                     println!("这一项连续 {play_fail} 次播不起来（{err}），跳过它，稍后再回来补");
                     let key = current_entry.clone().unwrap_or_else(|| label.clone());
+                    // 认领不释放：这一项确实归本路，别的路接手也是同样结果；
+                    // 本路后面还能回来补（owner 允许重入）。
                     store.touch(&key, Status::Running, pct, true);
                     let _ = store.save(&state_path);
                     play_fail = 0;
-                    match advance(&page, &mut store, &entries_sel, &state_path).await {
+                    match advance(&page, &mut store, &entries_sel, &state_path, is_top, shard).await {
                         Some(entry) => {
                             current_entry = Some(entry.clone());
                             println!("继续：{entry}");
@@ -385,6 +442,10 @@ pub async fn run(
         // 提前切走就白看了。没等到标记就继续等，必要时刷新页面让它自己更新。
         if site_done {
             let key = current_entry.take().unwrap_or_else(|| label.clone());
+            if shard.is_some() {
+                // 完成改成持久标记：站点列表刷新有延迟，释放认领会被重新捡起来再刷一遍
+                mark_done(&state_path, &key, lane_id);
+            }
             let why = "站点标记已完成";
             store.touch(&key, Status::Done, pct, false);
             store.save(&state_path)?;
@@ -393,7 +454,7 @@ pub async fn run(
             if finished >= cfg.max_items {
                 break;
             }
-            match advance(&page, &mut store, &entries_sel, &state_path).await {
+            match advance(&page, &mut store, &entries_sel, &state_path, is_top, shard).await {
                 Some(entry) => {
                     if is_entry_page && trail.len() < 8 {
                         trail.push(url.clone());
@@ -431,10 +492,11 @@ pub async fn run(
                 }
                 println!("刷新后仍没看到已完成标记，先跳到下一项，稍后再回来补");
                 let key = current_entry.clone().unwrap_or_else(|| label.clone());
+                // 同上：没确认完成就不放掉认领，避免两路轮流在这门课上反复试
                 store.touch(&key, Status::Running, pct, true);
                 let _ = store.save(&state_path);
                 refresh_tries = 0;
-                match advance(&page, &mut store, &entries_sel, &state_path).await {
+                match advance(&page, &mut store, &entries_sel, &state_path, is_top, shard).await {
                     Some(entry) => {
                         current_entry = Some(entry.clone());
                         println!("继续：{entry}");
@@ -476,7 +538,10 @@ async fn advance(
     store: &mut Store,
     selectors: &[String],
     state_path: &Path,
+    top: bool,
+    shard: Option<(u32, u32)>,
 ) -> Option<String> {
+    let lane = shard.map(|(k, _)| k).unwrap_or(0);
     let listed = eval_json(page, &format!("window.__YKT.entries({})", j(selectors))).await.ok()?;
     let items = listed.as_array()?;
     if items.is_empty() {
@@ -484,6 +549,7 @@ async fn advance(
     }
     for item in items {
         let label = item.get("label").and_then(|v| v.as_str())?.to_string();
+        let idx = item.get("i").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         let done = item.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
         if done {
             store.touch(&label, Status::Done, 100.0, false);
@@ -501,7 +567,12 @@ async fn advance(
                 continue;
             }
         }
-        let idx = item.get("i").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        // 多路分工：只在顶层课程列表上认领。create_new 是原子操作，两路同时抢
+        // 只有一路成功，另一路直接跳过——比按序号取模可靠：同一门课在页面里
+        // 可能对应多个条目（整行 + 行内按钮），取模会把同一门课分给两路。
+        if top && shard.is_some() && !try_claim(state_path, &label, lane) {
+            continue;
+        }
         let clicked = eval_json(
             page,
             &format!("window.__YKT.clickEntry({}, {idx})", j(selectors)),
@@ -513,12 +584,112 @@ async fn advance(
             let _ = store.save(state_path);
             return Some(label);
         }
+        // 点不动就把认领还回去，别让别的路一直当我们还在刷这门课
+        if top && shard.is_some() {
+            release_claim(state_path, &label);
+        }
     }
     None
 }
 
 fn j<T: serde::Serialize>(v: T) -> String {
     serde_json::to_string(&v).unwrap_or_else(|_| "null".into())
+}
+
+/// 多路分工用的认领目录：和状态文件放在一起，几路共用同一个 `state/`。
+fn claim_dir(state_path: &Path) -> PathBuf {
+    state_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("claims")
+}
+
+fn claim_file(state_path: &Path, label: &str) -> PathBuf {
+    claim_dir(state_path).join(format!("{:08x}.claim", fnv(label)))
+}
+
+/// 读认领文件里的 `lane=K status=...`；读不出来就当作没有认领。
+fn claim_meta(path: &Path) -> (Option<u32>, String) {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut lane = None;
+    let mut status = String::new();
+    for kv in text.split_whitespace() {
+        if let Some(v) = kv.strip_prefix("lane=") {
+            lane = v.parse::<u32>().ok();
+        } else if let Some(v) = kv.strip_prefix("status=") {
+            status = v.to_string();
+        }
+    }
+    (lane, status)
+}
+
+fn write_claim(path: &Path, lane: u32, status: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, format!("lane={lane} status={status}"));
+}
+
+/// 认领一门课。返回 false 表示这门课不归本路，直接跳过。
+///
+/// 分工只靠认领，不按列表下标取模：项目页里同一门课会同时匹配到整行和行内的
+/// 「去学习」按钮，一门课在列表里出现两次，按下标取模正好把它分给相邻两路，两路撞车。
+///
+/// 认领是**持久标志**，课程完成后不删除，而是改写成 `status=done`：站点课程列表
+/// 刷新有延迟，刚刷完的课还会显示"未完成"，一旦释放认领，别的路（或自己下一轮）
+/// 就会把它重新捡起来再刷一遍。只有"点了没进去"才释放。
+fn try_claim(state_path: &Path, label: &str, lane: u32) -> bool {
+    let path = claim_file(state_path, label);
+    if path.exists() {
+        let (owner, status) = claim_meta(&path);
+        // 已完成的课谁都不要再碰
+        if status == "done" {
+            return false;
+        }
+        // 自己的课允许回补：上一次可能播不起来，这一轮再试
+        if owner == Some(lane) {
+            return true;
+        }
+        // 别的路崩了会留下认领，超过 2 小时就当它放弃，接管过来
+        let stale = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .map(|t| t.elapsed().map(|d| d.as_secs() > 7200).unwrap_or(false))
+            .unwrap_or(false);
+        if stale {
+            write_claim(&path, lane, "running");
+            return true;
+        }
+        return false;
+    }
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            // 建不出认领目录就别互相阻塞，退化成各刷各的
+            return true;
+        }
+    }
+    match std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&path)
+    {
+        Ok(mut f) => {
+            use std::io::Write;
+            let _ = write!(f, "lane={lane} status=running");
+            true
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(_) => true,
+    }
+}
+
+/// 课程确认完成：认领不删除，改写成 `done`，永久挡住其它路重复刷。
+fn mark_done(state_path: &Path, label: &str, lane: u32) {
+    write_claim(&claim_file(state_path, label), lane, "done");
+}
+
+/// 只有"没点进去"才释放认领：说明这一项压根没被占用。
+fn release_claim(state_path: &Path, label: &str) {
+    let _ = std::fs::remove_file(claim_file(state_path, label));
 }
 
 /// 菜单里改的倍速：任何状态（等登录、刷课中）都能被立即采纳
